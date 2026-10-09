@@ -21,8 +21,9 @@ A rented Blackwell GPU is cheaper than a hosted uncensored API once you actually
 use it, and it is roughly ten times faster than the same model on a laptop. This
 repo makes that a single command: it starts the pod, serves the model over an
 OpenAI-compatible API, and gives your coding agent a **fixed local URL** that
-always points at whatever pod is currently running. A shutdown timer is attached
-automatically so a forgotten pod never drains your balance.
+always points at whatever pod is currently running. Layered shutdown protection
+reduces the risk of forgotten pods draining your balance, including a
+server-side timer when the installed RunPod CLI supports it.
 
 Measured on 2026-08-23: **~150 tok/s** on an RTX PRO 6000 with SGLang plus
 DFlash2 speculative decoding, single stream, 262K context. See
@@ -86,7 +87,7 @@ running → the proxy returns a clean 503 telling you to start one.
 | `bin/qwen38pi` | Lean: SGLang API only, for a coding agent. No OpenWebUI, ready sooner |
 | `bin/qwen38bench` | Measures decode rate, TTFT and accepted-token length (discards a warmup run) |
 | `bin/qwen38-proxy` | Local proxy on `127.0.0.1:8388` that always targets the running pod |
-| `bin/rp` | `runpodctl` wrapper that attaches a shutdown timer to every pod |
+| `bin/rp` | `runpodctl` wrapper that adds a server timer when supported and preserves the local reaper fallback |
 | `bin/runpod-reaper` | LaunchAgent backstop that kills forgotten pods after 1h |
 | `scripts/bootstrap-sglang-openwebui.sh` | Runs inside the pod: downloads weights, starts SGLang (optionally OpenWebUI) |
 | `launchagents/*.template` | macOS LaunchAgents for proxy and reaper; `__HOME__` is filled in at setup |
@@ -147,13 +148,17 @@ qwen38bench                              # picks the running pod, 5 runs + warmu
 
 ## Cost control
 
-Three layers make a forgotten pod impossible:
+Cost protection is layered:
 
-1. **`--terminate-after`** — server-side timer at RunPod, fires even with the Mac
-   asleep. `rp` sets it automatically.
-2. **`rp` wrapper** — attaches that flag to every `pod create` so you can't forget it.
-3. **`runpod-reaper`** — a LaunchAgent that runs every 10 minutes and kills any
+1. **`rp` wrapper** — detects whether `runpodctl` supports
+   `--terminate-after` and adds it when available.
+2. **Server-side timer** — when supported, fires even with the Mac asleep.
+3. **`runpod-reaper`** — remains enabled and, while the Mac is awake, kills any
    pod older than 1h that isn't named `keep-*`.
+
+If the installed CLI has no server-side timer flag, `rp` warns and does not add
+an unsupported option or exempt long-running pods from the reaper. Protection
+is then local only and cannot fire while the Mac is asleep.
 
 Full details in [docs/COST_CONTROL.md](docs/COST_CONTROL.md).
 
