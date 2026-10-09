@@ -150,7 +150,7 @@ Open comparisons for a future run: `--spec mtp` vs `dflash2`, and `bfloat16` vs
 | H100 booked for NVFP4 | FP4 falls back to the slow Marlin path | book Blackwell or use an FP8 checkpoint |
 | cold start measured | number 2 to 10x too low | `qwen38bench` discards the first run itself |
 | Python urllib against the proxy | HTTP 403 from the RunPod proxy | send a browser User-Agent, `curl` is unaffected |
-| SSH into the pod | connection refused | the SGLang image ships no sshd, unlike `runpod/pytorch` |
+| SSH into the pod with the default configuration | connection refused | SSH is intentionally off by default; launch with `QWEN38_ENABLE_SSH=1 qwen38fast` when debugging is needed |
 
 ## What's wrong when you read it elsewhere
 

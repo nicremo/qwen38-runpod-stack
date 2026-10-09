@@ -121,6 +121,21 @@ export QWEN38_TEMPLATE_PI=<id>    # the pi id
 You can also hardcode the template ids in `bin/qwen38fast` instead of exporting
 the env vars.
 
+**Bootstrap changes:** `./setup.sh` copies this checkout's bootstrap to
+`~/.local/share/qwen38-runpod-stack/`, which `qwen38fast` uses when creating
+new pods. Set `QWEN38_BOOTSTRAP=/path/to/bootstrap-sglang-openwebui.sh` to test
+an uninstalled working-tree version. For deployments launched from the RunPod
+web UI, run `./create-templates.sh` again and use the newly printed template IDs:
+existing RunPod templates retain their embedded bootstrap code.
+
+**Dependency isolation:** On full-stack deployments, OpenWebUI is installed
+into its own virtual environment (`/workspace/openwebui-venv`) using the `uv`
+bundled in the SGLang image. It defaults to OpenWebUI `0.11.4`; set
+`OPENWEBUI_VERSION` at pod creation to select a different version. SGLang's
+Python/PyTorch/NCCL environment is not modified by the bootstrap. Installing
+OpenWebUI into the serving environment while SGLang starts can replace NCCL
+libraries and crash DeepEP's startup check.
+
 ## Usage
 
 Lean path for a coding agent:
@@ -138,6 +153,20 @@ qwen38fast                               # starts, opens OpenWebUI
 qwen38fast status                        # what's running, what it costs
 qwen38fast stop
 ```
+
+### Debug SSH (off by default)
+
+SSH is disabled by default, including in newly created templates. This keeps the
+debugging service off unless it is explicitly required. To enable it for one new
+pod, use:
+
+```bash
+QWEN38_ENABLE_SSH=1 qwen38fast
+```
+
+The launcher passes this through as `ENABLE_SSH=1`; the bootstrap then installs
+and starts `sshd` before model downloads. Your RunPod account must have its SSH
+key registered. Leave the variable unset for normal launches.
 
 Measure the real decode rate:
 
@@ -190,6 +219,7 @@ which throws away the whole FP4 speedup without any error. Use a uniform
 | Endless thinking, no answer | `reasoning_effort` defaults high | pass `enable_thinking: false` or a lower effort |
 | HTTP 403 from the pod URL | RunPod proxy rejects the default urllib UA | send a browser User-Agent (the proxy already does) |
 | Editing a running pod wiped the model | RunPod recreates the container | put models on the `/workspace` volume, or expose ports at creation |
+| SGLang crashes in `deep_ep.check_nccl_so()` with `(deleted)` | concurrent pip install into SGLang Python environment | redeploy with isolated OpenWebUI environment; do not disable NCCL checks |
 
 ## License
 

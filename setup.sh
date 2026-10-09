@@ -16,6 +16,13 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *)
   echo "   NOTE: ~/.local/bin is not on PATH. Add it to your shell config." ;;
 esac
 
+echo "== 1b) bootstrap into ~/.local/share/qwen38-runpod-stack"
+BOOTSTRAP_DIR="$HOME/.local/share/qwen38-runpod-stack"
+mkdir -p "$BOOTSTRAP_DIR"
+install -m 700 \
+  "$HERE/scripts/bootstrap-sglang-openwebui.sh" \
+  "$BOOTSTRAP_DIR/bootstrap-sglang-openwebui.sh"
+
 echo "== 2) LaunchAgents (macOS)"
 if [ "$(uname)" = "Darwin" ]; then
   LA="$HOME/Library/LaunchAgents"; mkdir -p "$LA"

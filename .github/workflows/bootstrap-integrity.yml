@@ -1,0 +1,29 @@
+name: Bootstrap integrity
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/bootstrap-sglang-openwebui.sh
+          bash -n bin/qwen38fast
+          bash -n setup.sh
+          bash -n create-templates.sh
+      - name: Keep installs out of the serving environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -Eq '^[[:space:]]*(pip|python3?[[:space:]]+-m[[:space:]]+pip)[[:space:]]+install' scripts/bootstrap-sglang-openwebui.sh; then
+            echo 'Unisolated pip install found in SGLang bootstrap' >&2
+            exit 1
+          fi
+          grep -Fq 'uv venv --python /usr/bin/python3 "$WEBUI_VENV"' scripts/bootstrap-sglang-openwebui.sh
+          grep -Fq 'uv pip install --python "$WEBUI_VENV/bin/python"' scripts/bootstrap-sglang-openwebui.sh

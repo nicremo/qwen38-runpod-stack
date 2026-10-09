@@ -32,11 +32,14 @@ MODEL_ID="sakamakismile/Huihui-Qwen3.8-27B-abliterated-NVFP4"
 MAX_LEN="262144"
 MEM_FRAC="0.85"
 PI_MODE=0                         # --pi: no OpenWebUI, ready as soon as the API answers
+# Set QWEN38_ENABLE_SSH=1 only when an SSH debugging session is needed.
+ENABLE_SSH="${QWEN38_ENABLE_SSH:-0}"
 
 TOKEN_FILE="$HOME/.cache/huggingface/token"
 KEY_FILE="$HOME/.runpod/qwen38.key"
 POD_FILE="$HOME/.runpod/current-pod"
-BOOTSTRAP="$HOME/.claude/skills/runpod-llm/scripts/bootstrap-sglang-openwebui.sh"
+# Installed by setup.sh; override to test a working-tree bootstrap before deploying.
+BOOTSTRAP="${QWEN38_BOOTSTRAP:-$HOME/.local/share/qwen38-runpod-stack/bootstrap-sglang-openwebui.sh}"
 
 case "${1:-}" in
     status)
@@ -70,6 +73,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "$ENABLE_SSH" != "0" && "$ENABLE_SSH" != "1" ]]; then
+    echo "QWEN38_ENABLE_SSH must be 0 or 1" >&2
+    exit 1
+fi
+
 # Community cloud is the same card at roughly 20 percent less. It is not always
 # in stock, so fall back to secure rather than fail the launch.
 CLOUD="${RUNPOD_CLOUD:-COMMUNITY}"
@@ -100,7 +108,7 @@ if [[ "$running" != "0" ]]; then
 fi
 
 # --env replaces the template env object completely, so everything goes in here.
-ENV_JSON=$(python3 - "$BOOTSTRAP" "$TOKEN_FILE" "$MODEL_ID" "$SPEC" "$MAX_LEN" "$MEM_FRAC" "$KEY_FILE" "$PI_MODE" <<'PY'
+ENV_JSON=$(python3 - "$BOOTSTRAP" "$TOKEN_FILE" "$MODEL_ID" "$SPEC" "$MAX_LEN" "$MEM_FRAC" "$KEY_FILE" "$PI_MODE" "$ENABLE_SSH" <<'PY'
 import base64, json, pathlib, sys
 b64 = base64.b64encode(pathlib.Path(sys.argv[1]).read_bytes()).decode()
 env = {
@@ -113,6 +121,7 @@ env = {
     "MAMBA_RATIO":   "4.59",
     "SGLANG_API_KEY": pathlib.Path(sys.argv[7]).read_text().strip(),
     "SERVE_WEBUI":   "0" if sys.argv[8] == "1" else "1",
+    "ENABLE_SSH":    sys.argv[9],
 }
 tokfile = pathlib.Path(sys.argv[2])
 if tokfile.is_file():
