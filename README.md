@@ -21,8 +21,9 @@ A rented Blackwell GPU is cheaper than a hosted uncensored API once you actually
 use it, and it is roughly ten times faster than the same model on a laptop. This
 repo makes that a single command: it starts the pod, serves the model over an
 OpenAI-compatible API, and gives your coding agent a **fixed local URL** that
-always points at whatever pod is currently running. A shutdown timer is attached
-automatically so a forgotten pod never drains your balance.
+always points at whatever pod is currently running. Layered shutdown protection
+reduces the risk of forgotten pods draining your balance, including a
+server-side timer when the installed RunPod CLI supports it.
 
 Measured on 2026-08-23: **~150 tok/s** on an RTX PRO 6000 with SGLang plus
 DFlash2 speculative decoding, single stream, 262K context. See
@@ -86,7 +87,7 @@ running → the proxy returns a clean 503 telling you to start one.
 | `bin/qwen38pi` | Lean: SGLang API only, for a coding agent. No OpenWebUI, ready sooner |
 | `bin/qwen38bench` | Measures decode rate, TTFT and accepted-token length (discards a warmup run) |
 | `bin/qwen38-proxy` | Local proxy on `127.0.0.1:8388` that always targets the running pod |
-| `bin/rp` | `runpodctl` wrapper that attaches a shutdown timer to every pod |
+| `bin/rp` | `runpodctl` wrapper that adds a server timer when supported and preserves the local reaper fallback |
 | `bin/runpod-reaper` | LaunchAgent backstop that kills forgotten pods after 1h |
 | `scripts/bootstrap-sglang-openwebui.sh` | Runs inside the pod: downloads weights, starts SGLang (optionally OpenWebUI) |
 | `launchagents/*.template` | macOS LaunchAgents for proxy and reaper; `__HOME__` is filled in at setup |
@@ -121,6 +122,21 @@ export QWEN38_TEMPLATE_PI=<id>    # the pi id
 You can also hardcode the template ids in `bin/qwen38fast` instead of exporting
 the env vars.
 
+**Bootstrap changes:** `./setup.sh` copies this checkout's bootstrap to
+`~/.local/share/qwen38-runpod-stack/`, which `qwen38fast` uses when creating
+new pods. Set `QWEN38_BOOTSTRAP=/path/to/bootstrap-sglang-openwebui.sh` to test
+an uninstalled working-tree version. For deployments launched from the RunPod
+web UI, run `./create-templates.sh` again and use the newly printed template IDs:
+existing RunPod templates retain their embedded bootstrap code.
+
+**Dependency isolation:** On full-stack deployments, OpenWebUI is installed
+into its own virtual environment (`/workspace/openwebui-venv`) using the `uv`
+bundled in the SGLang image. It defaults to OpenWebUI `0.11.4`; set
+`OPENWEBUI_VERSION` at pod creation to select a different version. SGLang's
+Python/PyTorch/NCCL environment is not modified by the bootstrap. Installing
+OpenWebUI into the serving environment while SGLang starts can replace NCCL
+libraries and crash DeepEP's startup check.
+
 ## Usage
 
 Lean path for a coding agent:
@@ -139,6 +155,20 @@ qwen38fast status                        # what's running, what it costs
 qwen38fast stop
 ```
 
+### Debug SSH (off by default)
+
+SSH is disabled by default, including in newly created templates. This keeps the
+debugging service off unless it is explicitly required. To enable it for one new
+pod, use:
+
+```bash
+QWEN38_ENABLE_SSH=1 qwen38fast
+```
+
+The launcher passes this through as `ENABLE_SSH=1`; the bootstrap then installs
+and starts `sshd` before model downloads. Your RunPod account must have its SSH
+key registered. Leave the variable unset for normal launches.
+
 Measure the real decode rate:
 
 ```bash
@@ -147,13 +177,17 @@ qwen38bench                              # picks the running pod, 5 runs + warmu
 
 ## Cost control
 
-Three layers make a forgotten pod impossible:
+Cost protection is layered:
 
-1. **`--terminate-after`** — server-side timer at RunPod, fires even with the Mac
-   asleep. `rp` sets it automatically.
-2. **`rp` wrapper** — attaches that flag to every `pod create` so you can't forget it.
-3. **`runpod-reaper`** — a LaunchAgent that runs every 10 minutes and kills any
+1. **`rp` wrapper** — detects whether `runpodctl` supports
+   `--terminate-after` and adds it when available.
+2. **Server-side timer** — when supported, fires even with the Mac asleep.
+3. **`runpod-reaper`** — remains enabled and, while the Mac is awake, kills any
    pod older than 1h that isn't named `keep-*`.
+
+If the installed CLI has no server-side timer flag, `rp` warns and does not add
+an unsupported option or exempt long-running pods from the reaper. Protection
+is then local only and cannot fire while the Mac is asleep.
 
 Full details in [docs/COST_CONTROL.md](docs/COST_CONTROL.md).
 
@@ -190,6 +224,7 @@ which throws away the whole FP4 speedup without any error. Use a uniform
 | Endless thinking, no answer | `reasoning_effort` defaults high | pass `enable_thinking: false` or a lower effort |
 | HTTP 403 from the pod URL | RunPod proxy rejects the default urllib UA | send a browser User-Agent (the proxy already does) |
 | Editing a running pod wiped the model | RunPod recreates the container | put models on the `/workspace` volume, or expose ports at creation |
+| SGLang crashes in `deep_ep.check_nccl_so()` with `(deleted)` | concurrent pip install into SGLang Python environment | redeploy with isolated OpenWebUI environment; do not disable NCCL checks |
 
 ## License
 

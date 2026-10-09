@@ -5,41 +5,47 @@ exists because of that.
 
 ## The rule
 
-**Never create a pod without a shutdown timer. No exception, not even "just a
-quick test".** `qwen38fast` sets it itself. If you create a pod by hand, use `rp`:
+**Always create pods through `rp`, including quick tests.** It adds a
+server-side shutdown timer when the installed `runpodctl` supports one and
+keeps the local reaper fallback active on versions that do not:
 
 ```bash
-rp pod create ...                  # sets --terminate-after to now+1h
-RUNPOD_MAX_AGE_HOURS=6 rp pod create ...   # longer window
+rp pod create ...                          # 1h local-reaper limit
+RUNPOD_MAX_AGE_HOURS=6 rp pod create ...   # requests a 6h window
 rp 6h pod create ...                       # same, shorter
 ```
 
 `rp` lives in `~/.local/bin/rp` and passes everything through to `runpodctl`
-unchanged. Only on `pod create` does it check whether `--terminate-after` or
-`--stop-after` is present, and adds the timer otherwise.
+unchanged. On `pod create`, it first inspects the command's help output. If
+`--terminate-after` is available and no timer was supplied, it adds one. If the
+flag is unavailable, it emits a warning and lets the local reaper enforce its
+one-hour limit while the Mac is running.
 
-If you call `runpodctl pod create` directly, add the flag by hand:
+You can check whether the installed CLI exposes a server-side timer:
 
 ```bash
-runpodctl pod create ... --terminate-after "$(date -u -v+1H '+%Y-%m-%dT%H:%M:%SZ')"
+runpodctl pod create --help | grep -- --terminate-after
 ```
 
 ## The three layers
 
 | Layer | What | Fires when |
 |---|---|---|
-| 1. `--terminate-after` | server-side at RunPod | always, even with the Mac asleep or the session gone |
-| 2. `rp` wrapper | sets layer 1 automatically | you forget the flag |
-| 3. `runpod-reaper` | LaunchAgent, every 10 min, kills anything over 1h | pod came from the web console or elsewhere |
+| 1. `rp` wrapper | detects and sets a supported timer flag | every `rp pod create` |
+| 2. `--terminate-after` | server-side at RunPod | when the installed CLI supports it, even with the Mac asleep |
+| 3. `runpod-reaper` | LaunchAgent, every 10 min, kills anything over 1h | while the Mac is running, including pods from the web console |
 
-Layer 1 is the only one that works without a running Mac, so it's mandatory.
-Conversely: **layer 1 can't be verified.** `pod get` returns no `terminateAfter`,
-so you never actually see whether RunPod stored the timer. That's exactly why
-layer 3 stays active instead of trusting the timer.
+The server-side timer is the only layer that works without a running Mac, but
+not every `runpodctl` release exposes it. It also can't be verified through
+`pod get`, which returns no `terminateAfter`. That's why the reaper stays active
+instead of trusting the timer. When the flag is unavailable, protection is
+local only and cannot fire while the Mac is asleep or offline.
 
-**To keep a pod alive on purpose:** start its name with `keep-`, then the reaper
-leaves it alone. The layer-1 timer still applies and must be set explicitly. `rp`
-does both automatically once the window is longer than one hour.
+For windows longer than one hour, `rp` adds a `keep-` name prefix only when a
+server-side timer is present. If the CLI has no timer support, the requested
+longer window cannot be safely guaranteed, so the reaper continues to enforce
+one hour. Manually naming a pod `keep-*` bypasses that protection and should be
+reserved for actively monitored runs.
 
 Check the reaper by hand:
 
@@ -54,9 +60,10 @@ well, not that it isn't running. Whether it runs shows in
 ## What RunPod can't do
 
 **There is no global auto-terminate setting.** An idle timeout exists only for
-serverless endpoints, not for pods, neither in the CLI nor in account settings.
-`runpodctl user` is read-only. The only account-wide cap is the spend limit, but
-that only bites once the month is already burned.
+serverless endpoints, not for pods. Some CLI releases expose
+`--terminate-after`; others do not. `runpodctl user` is read-only. The only
+account-wide cap is the spend limit, but that only bites once the month is
+already burned.
 
 ## Prices, as of 2026-08-22
 

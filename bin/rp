@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# rp - runpodctl wrapper that never lets a pod outlive its timer.
+# rp - runpodctl wrapper that applies the best available shutdown protection.
 #
-# Injects --terminate-after into every `pod create` that does not already
-# carry a timer flag. RunPod enforces this server-side, so it still fires
-# when the Mac is asleep or the session is gone.
+# Injects --terminate-after when the installed runpodctl supports it. Some
+# releases do not expose a server-side timer; in that case the local reaper
+# remains active and the wrapper does not pass an unsupported flag.
 #
 # Usage: exactly like runpodctl, e.g.  rp pod create --name x --gpu-id "..."
 #
-#   rp pod create --name test ...              1h window, reaper may also kill it
-#   rp 6h pod create --name train ...          6h window, reaper keeps hands off
-#   RUNPOD_MAX_AGE_HOURS=6 rp pod create ...   same thing via env
+#   rp pod create --name test ...              1h reaper window
+#   rp 6h pod create --name train ...          6h if server timer is supported
+#   RUNPOD_MAX_AGE_HOURS=6 rp pod create ...   same request via env
 #
-# Anything longer than the reaper's own window gets a "keep-" name prefix,
-# otherwise the reaper would terminate the pod after 1h regardless of the
-# server-side timer, and the longer window would be a lie.
+# Longer-lived pods get a "keep-" prefix only when a server-side timer protects
+# them. Without one, the reaper keeps enforcing its own window instead of
+# allowing an unbounded pod.
 
 set -uo pipefail
 
@@ -34,6 +34,12 @@ if [[ ! -x "$RUNPODCTL" ]]; then
 fi
 
 if [[ "${1:-}" == "pod" && "${2:-}" == "create" ]]; then
+    create_help=$("$RUNPODCTL" pod create --help 2>&1 || true)
+    timer_supported=0
+    if grep -q -- '--terminate-after' <<<"$create_help"; then
+        timer_supported=1
+    fi
+
     has_timer=0
     for arg in "$@"; do
         case "$arg" in
@@ -43,16 +49,21 @@ if [[ "${1:-}" == "pod" && "${2:-}" == "create" ]]; then
         esac
     done
 
-    if [[ $has_timer -eq 0 ]]; then
+    server_timer=0
+    if [[ $has_timer -eq 1 ]]; then
+        server_timer=1
+        echo "rp: timer flag already present, leaving it alone" >&2
+    elif [[ $timer_supported -eq 1 ]]; then
         deadline=$(date -u -v "+${MAX_AGE_HOURS}H" '+%Y-%m-%dT%H:%M:%SZ')
         echo "rp: auto-terminate set to $deadline (+${MAX_AGE_HOURS}h)" >&2
         set -- "$@" --terminate-after "$deadline"
+        server_timer=1
     else
-        echo "rp: timer flag already present, leaving it alone" >&2
+        echo "rp: runpodctl has no --terminate-after support; relying on the local reaper" >&2
     fi
 
-    # Shield longer-lived pods from the reaper by renaming them.
-    if [[ $MAX_AGE_HOURS -gt $REAPER_WINDOW_HOURS ]]; then
+    # Shield longer-lived pods only when RunPod can enforce their deadline.
+    if [[ $server_timer -eq 1 && $MAX_AGE_HOURS -gt $REAPER_WINDOW_HOURS ]]; then
         rebuilt=()
         renamed=0
         while [[ $# -gt 0 ]]; do
@@ -87,6 +98,9 @@ if [[ "${1:-}" == "pod" && "${2:-}" == "create" ]]; then
             echo "rp: window is longer than the reaper's ${REAPER_WINDOW_HOURS}h," \
                  "prefixed the name with keep- so it survives" >&2
         fi
+    elif [[ $MAX_AGE_HOURS -gt $REAPER_WINDOW_HOURS ]]; then
+        echo "rp: requested ${MAX_AGE_HOURS}h cannot be protected server-side;" \
+             "the reaper will still enforce its ${REAPER_WINDOW_HOURS}h limit" >&2
     fi
 fi
 
