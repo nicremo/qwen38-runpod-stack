@@ -5,8 +5,9 @@
     qwen38bench <POD_ID>
     qwen38bench --isl 8192      # match the cookbook's ISL 8192 / OSL 1024 point
 
-Reports TTFT, output tok/s per request, and the server's accepted-token length
-under speculative decoding. A number without warmup is 2 to 10 times too low,
+Reports TTFT and decode tok/s using server-reported completion_tokens, NOT the
+number of SSE chunks. Missing usage produces n/a instead of fabricated tok/s.
+The output is measured over the RunPod proxy, not inside the GPU server. A number without warmup is 2 to 10 times too low,
 so the first run is always discarded.
 
 Every figure printed here is single-stream (concurrency 1). That is the number
@@ -59,10 +60,29 @@ def post(url: str, payload: dict, timeout: int = 600):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+def sse_events(response):
+    """Yield complete SSE data payloads (not chunks/tokens).
+
+    SSE fields can span multiple lines; event boundaries are blank lines.
+    Comments and keepalives are ignored.
+    """
+    data = []
+    for raw in response:
+        line = raw.decode("utf-8").rstrip("\r\n")
+        if line.startswith("data:"):
+            data.append(line[5:].lstrip(" "))
+        elif not line:
+            if data:
+                yield "\n".join(data)
+                data = []
+    if data:
+        yield "\n".join(data)
+
+
 def one_run(api: str, model: str, isl: int, osl: int, stream: bool = True) -> dict:
     prompt = PROMPT
     if isl > 0:
-        # Pad to roughly the requested input length. Tokens are ~4 chars.
+        # Approximate padding, NOT measured input tokens.
         prompt = (PROMPT + " ") * max(1, isl // 25)
     payload = {
         "model": model,
@@ -72,40 +92,63 @@ def one_run(api: str, model: str, isl: int, osl: int, stream: bool = True) -> di
         "top_p": 0.95,
         "stream": stream,
         "stream_options": {"include_usage": True} if stream else None,
-        # Thinking on by default would spend the whole budget in the reasoning
-        # trace and make the number meaningless for a chat turn.
         "chat_template_kwargs": {"enable_thinking": False},
     }
     payload = {k: v for k, v in payload.items() if v is not None}
 
     start = time.perf_counter()
     ttft = None
-    tokens = 0
     usage = None
-    with post(f"{api}/chat/completions", payload) as resp:
-        for raw in resp:
-            line = raw.decode().strip()
-            if not line.startswith("data: "):
-                continue
-            body = line[6:]
-            if body == "[DONE]":
-                break
-            chunk = json.loads(body)
-            if chunk.get("usage"):
-                usage = chunk["usage"]
-            for ch in chunk.get("choices", []):
-                if ch.get("delta", {}).get("content"):
-                    if ttft is None:
+    if stream:
+        done = False
+        with post(f"{api}/chat/completions", payload) as resp:
+            for body in sse_events(resp):
+                if body == "[DONE]":
+                    done = True
+                    break
+                chunk = json.loads(body)
+                if isinstance(chunk.get("usage"), dict):
+                    usage = chunk["usage"]
+                for choice in chunk.get("choices") or []:
+                    delta = choice.get("delta") or {}
+                    # TTFT is the first output, not a role-only SSE event.
+                    tool_output = any(
+                        (call.get("function") or {}).get("arguments")
+                        for call in delta.get("tool_calls") or []
+                        if isinstance(call, dict)
+                    )
+                    if ttft is None and (
+                        delta.get("content") or delta.get("reasoning_content")
+                        or tool_output
+                    ):
                         ttft = time.perf_counter() - start
-                    tokens += 1
+        if not done:
+            raise ValueError("incomplete SSE response (missing [DONE])")
+    else:
+        # Non-streaming responses cannot provide a meaningful TTFT/decode rate.
+        with post(f"{api}/chat/completions", payload) as resp:
+            result = json.load(resp)
+        if isinstance(result.get("usage"), dict):
+            usage = result["usage"]
+
     total = time.perf_counter() - start
-    out_tokens = (usage or {}).get("completion_tokens") or tokens
-    decode_time = total - (ttft or 0)
+    out_tokens = (usage or {}).get("completion_tokens")
+    # An SSE event is NOT a token; never invent a token count from chunk count.
+    if type(out_tokens) is not int or out_tokens < 0:
+        out_tokens = None
+    decode_time = total - ttft if ttft is not None else None
+    # The first generated token arrived at TTFT, before the decode interval.
+    tps = ((out_tokens - 1) / decode_time
+           if out_tokens is not None and out_tokens > 1
+           and decode_time is not None and decode_time > 0 else None)
     return {
-        "ttft": ttft or 0.0,
+        "ttft": ttft,
         "total": total,
         "out_tokens": out_tokens,
-        "tps": out_tokens / decode_time if decode_time > 0 else 0.0,
+        "prompt_tokens": (usage or {}).get("prompt_tokens"),
+        "tps": tps,
+        "token_count_source": "server_usage" if out_tokens is not None
+                              else "unavailable",
     }
 
 
@@ -125,6 +168,8 @@ def main() -> int:
     ap.add_argument("--osl", type=int, default=1024, help="output length in tokens")
     ap.add_argument("--runs", type=int, default=3, help="measured runs after warmup")
     args = ap.parse_args()
+    if args.runs < 1 or args.osl < 1 or args.isl < 0:
+        ap.error("--runs/--osl must be positive, --isl must be nonnegative")
 
     pod = args.pod_id or running_pod()
     api = f"https://{pod}-8000.proxy.runpod.net/v1"
@@ -141,14 +186,35 @@ def main() -> int:
     for i in range(args.runs):
         r = one_run(api, model, args.isl, args.osl)
         results.append(r)
-        print(f"  run {i+1}: {r['tps']:6.1f} tok/s | TTFT {r['ttft']*1000:7.0f} ms "
-              f"| {r['out_tokens']} tokens")
+        speed = f"{r['tps']:.1f}" if r["tps"] is not None else "n/a"
+        latency = f"{r['ttft'] * 1000:.0f}" if r["ttft"] is not None else "n/a"
+        out_tokens = (str(r["out_tokens"]) if r["out_tokens"] is not None
+                      else "n/a (server usage unavailable)")
+        print(f"  run {i + 1}: {speed} tok/s | TTFT {latency} ms "
+              f"| {out_tokens} server tokens")
 
-    tps = sorted(x["tps"] for x in results)
-    ttft = sorted(x["ttft"] for x in results)
-    mid = len(tps) // 2
-    print(f"\n  Median: {tps[mid]:.1f} tok/s | TTFT {ttft[mid]*1000:.0f} ms "
-          f"| TPOT {1000/tps[mid]:.2f} ms")
+    # Missing server usage must never become a fake decode speed or crash.
+    tps = sorted(r["tps"] for r in results if r["tps"] is not None)
+    ttft = sorted(r["ttft"] for r in results if r["ttft"] is not None)
+    if tps:
+        middle = len(tps) // 2
+        median_tps = ((tps[middle - 1] + tps[middle]) / 2
+                      if len(tps) % 2 == 0 else tps[middle])
+        speed_report = (f"{median_tps:.1f} tok/s | "
+                        f"TPOT {1000 / median_tps:.2f} ms"
+                        if median_tps > 0 else "n/a")
+    else:
+        speed_report = "n/a (server usage unavailable)"
+    if ttft:
+        middle = len(ttft) // 2
+        median_ttft = ((ttft[middle - 1] + ttft[middle]) / 2
+                       if len(ttft) % 2 == 0 else ttft[middle])
+        latency_report = f"{median_ttft * 1000:.0f} ms"
+    else:
+        latency_report = "n/a"
+    print(f"\n  Median: {speed_report} | TTFT {latency_report}")
+    print("  Token counts are from completion_tokens in server usage; "
+          "SSE chunks are never counted as tokens.")
 
     info = server_info(api)
     for key in ("speculative_algorithm", "avg_spec_accept_length",

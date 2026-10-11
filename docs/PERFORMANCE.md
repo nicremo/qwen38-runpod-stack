@@ -2,6 +2,15 @@
 
 As of 2026-08-22. Everything here is sourced, references sit next to every number.
 
+> **Token-counting correction (2026-10):** Earlier performance numbers here were
+> collected with a `qwen38bench` version that could use streaming **SSE chunk
+> counts** when `usage.completion_tokens` was missing. A chunk may carry zero,
+> one or multiple generated tokens, so those historical tok/s estimates should
+> not be treated as validated token counts. The updated benchmark requests
+> streaming usage and computes decode rate **only** from the server's actual
+> `completion_tokens`; otherwise it prints `n/a`. Proxy-client rates also
+> include network timing and are not directly comparable to in-Pod measurements.
+
 ## TL;DR
 
 ```bash
